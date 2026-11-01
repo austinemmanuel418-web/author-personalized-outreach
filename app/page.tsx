@@ -83,31 +83,30 @@ type Author = {
 
 const EMAIL_REGEX = /[^\s,;<>"']+@[^\s,;<>"']+\.[^\s,;<>"']+/g;
 const DEFAULT_SUBJECT =
-  "Media Feature Spotlight: [Book Title] for USA Wire & AP News";
+  "[Book Title] has been selected for  an Author Spotlight feature";
 
 const DEFAULT_BODY = `Hello [Author First Name],
 
-The editorial team at The Author Global Press is currently reviewing [Book Title] for a national media feature spotlight, targeting widespread syndication across major press networks including USA Wire and Associated Press (AP News).
+I recently came across [Book Title] and was drawn to [specific detail, e.g., the way it explores grief and healing / your approach to teaching leadership through real stories]. [One sentence about something specific you noticed, such as the book's central idea, the author's background, or why the topic matters.]
 
-When reviewing your work, our team was deeply drawn to the [insert specific book themes, e.g., leadership / personal growth / emotional] insights in your book, as well as your personal journey [insert 1 quick sentence about their background]. Your perspective brings precisely the inspiring narrative that national news platforms value.
+I'm reaching out from The Author Global Press Book Review, an independent editorial platform that features authors and their books. This Spotlight Feature  would focus on you, covering your writing journey, what inspired [Book Title], and the message you hope readers take away.
 
-How This Media Placement Benefits Your Book:
+A feature like this can help you:
 
+1. Introduce your [Book Title] to thousands of active readers across syndicated news feeds daily.
+2. Build permanent Google Search ranking whenever potential readers look up your name or book title.
+3. Establish strong media credibility and official press recognition for your author brand.
+4. Drive direct sales traffic with strategically placed buy links pointing straight to your Amazon page.
+5. Gain a lifetime shareable marketing asset to feature in your press kit, social media, and author newsletter.
+6. Save valuable time, as our editorial team handles 100% of the writing and layout preparation for you.
 
-High-Value Audience Reach: Direct placement across high-authority news wires, putting your message in front of millions of readers, industry leaders, and literary professionals.
+Our team would love to write a custom, complimentary feature draft on your book so that you can review the exact layout and narrative before making any decisions. There is no drafting fee!
 
-Authority-Building Media Assets: Official press publication credits with USA Wire and AP News logos to display proudly on your author platform, website, and book jackets.
+If this sounds interesting, just reply "YES" and I'll send the next steps.
 
-Permanent High-Domain Discoverability: Guaranteed indexing on high-domain news sites, ensuring your name and book title rank prominently at the top of search results indefinitely.
+Whatever you decide, thank you for putting something meaningful into the world. That takes real effort, and it matters far more than most people realize.
 
-Syndicated Brand Exposure: Comprehensive digital syndication that captures the attention of massive regional and national audiences, driving enduring organic traffic to your work.
-
-Review and Syndication Process
-
-To ensure total alignment with your brand, our production team constructs a complete, press-ready layout preview before anything is scheduled for wire distribution. Our initial drafting and editorial reviews are conducted entirely without financial obligation or cost to the author. You retain 100% editorial control; we move forward with national wire syndication only after you review and approve the final text layout. Once your feature is approved, our team handles the technical syndication across our media network to maximize your book's reach. If you would like to review your custom press layout preview or examine recent feature spotlights, please reply directly to this message to initiate the preview process.
-
-Best regards,
-Austin`;
+Best regards,`;
 
 // ---------- Look and feel (purple and white) ----------
 const CARD = "rounded-2xl border border-violet-100 bg-white p-6 shadow-sm";

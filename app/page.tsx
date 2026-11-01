@@ -1103,68 +1103,6 @@ export default function Home() {
     await fillTemplate(a, { bookWhy, authorBio: bio });
   }
 
-  // Reads one exact Amazon or Goodreads page that you pasted
-  async function readBookLink(a: Author) {
-    const url = (a.bookLink ?? "").trim();
-    if (!a.result?.authorName) return;
-    if (!/^https?:\/\//i.test(url)) {
-      updateAuthor(a.email, {
-        linkMessage: "Paste the full link, starting with https://",
-      });
-      return;
-    }
-    updateAuthor(a.email, { linkLoading: true, linkMessage: "" });
-
-    try {
-      const res = await fetch("/api/book-from-link", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, authorName: a.result.authorName }),
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        updateAuthor(a.email, {
-          linkLoading: false,
-          linkMessage: data.error || "Could not read that page.",
-        });
-        return;
-      }
-
-      setAuthors((current) =>
-        current.map((x) =>
-          x.email === a.email && x.result
-            ? {
-                ...x,
-                linkLoading: false,
-                bookChecked: true,
-                bookMessage: "",
-                linkMessage: `✅ Book details read from the link${
-                  data.title ? ` for "${data.title}"` : ""
-                }${
-                  data.year ? ` (published ${data.year})` : ""
-                }. Click Fill again on the email below.`,
-                result: {
-                  ...x.result,
-                  bookTitle: data.title || x.result.bookTitle,
-                  bookWhy: data.bookWhy || x.result.bookWhy,
-                  sources: [
-                    { title: data.title || "Book page", url },
-                    ...x.result.sources.filter((s) => s.url !== url),
-                  ],
-                },
-              }
-            : x,
-        ),
-      );
-    } catch {
-      updateAuthor(a.email, {
-        linkLoading: false,
-        linkMessage: "Could not reach the server.",
-      });
-    }
-  }
-
   const MAX_PER_RUN = 30;
 
   function hasPlaceholder(d: Draft) {
@@ -1860,34 +1798,6 @@ export default function Home() {
                             </p>
                           </div>
                         ))}
-                        <div className="space-y-2 rounded-lg border border-violet-200 bg-white p-3">
-                          <label className={LABEL}>
-                            Know the exact book? Paste its Amazon or Goodreads
-                            link
-                          </label>
-                          <div className="flex flex-wrap gap-2">
-                            <input
-                              value={a.bookLink ?? ""}
-                              onChange={(e) =>
-                                updateAuthor(a.email, {
-                                  bookLink: e.target.value,
-                                })
-                              }
-                              placeholder="https://www.amazon.com/dp/..."
-                              className={`${INPUT} min-w-[14rem] flex-1`}
-                            />
-                            <button
-                              onClick={() => readBookLink(a)}
-                              disabled={a.linkLoading}
-                              className={BTN_SM}
-                            >
-                              {a.linkLoading ? "Reading…" : "Read this page"}
-                            </button>
-                          </div>
-                          {a.linkMessage && (
-                            <p className="text-violet-900">{a.linkMessage}</p>
-                          )}
-                        </div>
                       </div>
                     )}
 

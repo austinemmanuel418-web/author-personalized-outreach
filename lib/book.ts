@@ -89,8 +89,10 @@ export async function researchBook(
   try {
     found = keep(
       await webSearch(`${bookTitle} ${authorName} book`, [
-        "amazon.com",
         "goodreads.com",
+        "amazon.com",
+        "amazon.co.uk",
+        "amazon.ca",
       ]),
     );
   } catch {}

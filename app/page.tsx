@@ -31,6 +31,7 @@ type Book = {
   source: string;
   link: string;
   subtitle?: string;
+  recent?: boolean;
 };
 
 type Site = { website: string; contacts: { url: string; form: boolean }[] };
@@ -74,6 +75,7 @@ type Author = {
   siteMessage?: string;
   emailCheck?: EmailCheck;
   checking?: boolean;
+  bookChecked?: boolean;
 };
 
 const EMAIL_REGEX = /[^\s,;<>"']+@[^\s,;<>"']+\.[^\s,;<>"']+/g;
@@ -448,6 +450,7 @@ export default function Home() {
           return {
             ...a,
             bookLoading: false,
+            bookChecked: true,
             bookMessage: data.bookWhy
               ? "Book details found. Click Fill again on the email below to put them in."
               : "No details about this book were found on the pages. Use Edit to type your own detail.",
@@ -491,7 +494,7 @@ export default function Home() {
       findBookDetails(email, c.authorName, c.bookTitle);
   }
 
-  // Finds up to 3 books of an author (free: Google Books and Open Library)
+  // Finds up to 3 books of an author, newest first (recent = last 3 years)
   async function findBooks(key: string, authorName: string) {
     updateAuthor(key, { booksLoading: true, booksMessage: "" });
     try {
@@ -509,13 +512,42 @@ export default function Home() {
         return;
       }
       const list: Book[] = data.books || [];
-      updateAuthor(key, {
-        booksLoading: false,
-        books: list,
-        booksMessage: list.length
+      const message = !list.length
+        ? "No books found. Use Edit to type the book title yourself."
+        : data.anyRecent
           ? ""
-          : "No books found. Use Edit to type the book title yourself.",
-      });
+          : `No book from ${data.minYear} or later was found. The newest one I could find is "${list[0].title}"${list[0].year ? ` (${list[0].year})` : ""}.`;
+
+      setAuthors((current) =>
+        current.map((x) => {
+          if (x.email !== key) return x;
+          const cur = x.result;
+          let result = cur;
+          let changed = false;
+          if (cur && list.length > 0) {
+            const picked = list.find((b) => b.title === cur.bookTitle);
+            // Keep the pick only if it is recent, or already the newest one
+            const keep =
+              picked && (picked.recent || picked.title === list[0].title);
+            if (!keep) {
+              result = {
+                ...cur,
+                bookTitle: list[0].title,
+                bookWhy: list[0].description || "",
+              };
+              changed = true;
+            }
+          }
+          return {
+            ...x,
+            booksLoading: false,
+            books: list,
+            booksMessage: message,
+            result,
+            ...(changed ? { bookChecked: false } : {}),
+          };
+        }),
+      );
     } catch {
       updateAuthor(key, {
         booksLoading: false,
@@ -524,16 +556,11 @@ export default function Home() {
     }
   }
 
-  // Uses one of the 3 books
+  // Uses one of the 3 books, then reads its Amazon and Goodreads pages
   function pickBook(key: string, b: Book, authorName: string) {
-    updateResult(key, {
-      bookTitle: b.title,
-      bookWhy:
-        b.description ||
-        (b.subtitle ? `The book's subtitle is "${b.subtitle}".` : ""),
-    });
-    updateAuthor(key, { bookMessage: "" });
-    if (!b.description) findBookDetails(key, authorName, b.title);
+    updateResult(key, { bookTitle: b.title, bookWhy: b.description });
+    updateAuthor(key, { bookMessage: "", bookChecked: false });
+    findBookDetails(key, authorName, b.title);
   }
 
   // Finds the public background of the author
@@ -801,7 +828,7 @@ export default function Home() {
     return authors.some((x) => x.email === "name:" + name.trim().toLowerCase());
   }
 
-  // Researches every author that is not done yet, one after the other
+  // Researches every author that is not done yet, two at a time
   async function researchAll() {
     const todo = authors.filter(
       (a) => a.status === "idle" || a.status === "error",
@@ -817,43 +844,41 @@ export default function Home() {
     )
       return;
 
+    const WORKERS = 2; // set to 1 if you often see "Rate limit reached"
     stopResearchRef.current = false;
     setResearchingAll(true);
     setError("");
     let ok = 0;
     let failed = 0;
+    let finished = 0;
+    let next = 0;
 
-    for (let i = 0; i < todo.length; i++) {
-      if (stopResearchRef.current) break;
-      setResearchProgress(
-        `Researching ${i + 1} of ${todo.length}: ${todo[i].email}`,
-      );
-      let result = await researchAuthor(todo[i]);
+    const worker = async (startDelay: number) => {
+      await wait(startDelay);
+      while (!stopResearchRef.current) {
+        const i = next++;
+        if (i >= todo.length) break;
+        setResearchProgress(`Researching ${finished + 1} of ${todo.length}…`);
 
-      // If we hit the rate limit, wait one minute and try once more
-      if (result === "rate" && !stopResearchRef.current) {
-        for (let s = 60; s > 0 && !stopResearchRef.current; s--) {
-          setResearchProgress(
-            `Rate limit reached. Waiting ${s}s, then trying again...`,
-          );
-          await wait(1000);
+        let result = await researchAuthor(todo[i]);
+
+        // If we hit the rate limit, wait a little and try once more
+        if (result === "rate" && !stopResearchRef.current) {
+          setResearchProgress("Rate limit reached. Waiting 40 seconds…");
+          await wait(40000);
+          if (!stopResearchRef.current) result = await researchAuthor(todo[i]);
         }
-        if (!stopResearchRef.current) result = await researchAuthor(todo[i]);
-      }
 
-      if (result === "ok") ok++;
-      else failed++;
-
-      // A short pause before the next author
-      if (i < todo.length - 1) {
-        for (let s = 5; s > 0 && !stopResearchRef.current; s--) {
-          setResearchProgress(
-            `Done ${ok} of ${todo.length}. Next author in ${s}s...`,
-          );
-          await wait(1000);
-        }
+        if (result === "ok") ok++;
+        else failed++;
+        finished++;
+        setResearchProgress(`Done ${finished} of ${todo.length}…`);
       }
-    }
+    };
+
+    await Promise.all(
+      Array.from({ length: WORKERS }, (_, k) => worker(k * 1500)),
+    );
 
     setResearchingAll(false);
     setResearchProgress(
@@ -874,7 +899,10 @@ export default function Home() {
     );
   }
 
-  async function fillTemplate(author: Author) {
+  async function fillTemplate(
+    author: Author,
+    facts?: { bookWhy: string; authorBio: string },
+  ) {
     if (!author.result) return;
     if (!subjectTemplate.trim() || !bodyTemplate.trim()) {
       setError("Your template is empty. Add a subject and a message first.");
@@ -883,29 +911,13 @@ export default function Home() {
     setError("");
     updateAuthor(author.email, { writing: true });
 
-    const { authorName, bookTitle, bookWhy } = author.result;
-    let bio = author.result.authorBio || "";
+    const { authorName, bookTitle } = author.result;
+    const bookWhy = facts?.bookWhy ?? author.result.bookWhy;
+    const bio = facts?.authorBio ?? author.result.authorBio ?? "";
     const details: Record<string, string> = {};
 
-    const slots = findAiSlots(subjectTemplate + "\n" + bodyTemplate);
-
-    // If the template needs details and the background is missing, look it up
-    if (slots.length > 0 && !bio) {
-      try {
-        const r2 = await fetch("/api/author-bio", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ authorName }),
-        });
-        const d2 = await r2.json();
-        if (r2.ok && d2.bio) {
-          bio = d2.bio;
-          updateResult(author.email, { authorBio: d2.bio });
-        }
-      } catch {}
-    }
-
     // Ask Gemini to write every other [bracket] in your template
+    const slots = findAiSlots(subjectTemplate + "\n" + bodyTemplate);
     if (slots.length > 0 && (bookWhy || bio)) {
       try {
         const res = await fetch("/api/fill-detail", {
@@ -996,6 +1008,95 @@ export default function Home() {
     }
     updateAuthor(a.email, { checking: false, emailCheck: check });
     return check;
+  }
+  // Gets book facts from the web (does not touch the screen)
+  async function fetchBookFacts(authorName: string, bookTitle: string) {
+    try {
+      const res = await fetch("/api/research-book", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authorName, bookTitle }),
+      });
+      const data = await res.json();
+      if (!res.ok) return null;
+      return {
+        bookWhy: String(data.bookWhy || ""),
+        sources: (data.sources || []) as Source[],
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // Gets the author's background from the web (does not touch the screen)
+  async function fetchBio(authorName: string) {
+    try {
+      const res = await fetch("/api/author-bio", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authorName }),
+      });
+      const data = await res.json();
+      if (!res.ok) return null;
+      return String(data.bio || "");
+    } catch {
+      return null;
+    }
+  }
+
+  // After you approve: read the book pages and the background at the same
+  // time, then fill the template automatically
+  async function prepareAuthor(a: Author) {
+    const r = a.result;
+    if (!r) return;
+    if (!subjectTemplate.trim() || !bodyTemplate.trim()) {
+      setError("Your template is empty. Add a subject and a message first.");
+      return;
+    }
+    updateAuthor(a.email, { writing: true });
+
+    let bookWhy = r.bookWhy;
+    let bio = r.authorBio || "";
+    let newSources: Source[] = [];
+    let checked = !!a.bookChecked;
+
+    const needs = findAiSlots(subjectTemplate + "\n" + bodyTemplate).length > 0;
+    if (needs) {
+      const [book, bioText] = await Promise.all([
+        !a.bookChecked && r.bookTitle
+          ? fetchBookFacts(r.authorName, r.bookTitle)
+          : null,
+        !bio && r.authorName ? fetchBio(r.authorName) : null,
+      ]);
+      if (book) {
+        bookWhy = book.bookWhy || bookWhy;
+        newSources = book.sources;
+        checked = true;
+      }
+      if (bioText) bio = bioText;
+
+      setAuthors((current) =>
+        current.map((x) => {
+          if (x.email !== a.email || !x.result) return x;
+          const have = new Set(x.result.sources.map((s) => s.url));
+          return {
+            ...x,
+            bookChecked: checked,
+            result: {
+              ...x.result,
+              bookWhy,
+              authorBio: bio,
+              sources: [
+                ...x.result.sources,
+                ...newSources.filter((s) => !have.has(s.url)),
+              ],
+            },
+          };
+        }),
+      );
+    }
+
+    await fillTemplate(a, { bookWhy, authorBio: bio });
   }
 
   const MAX_PER_RUN = 30;
@@ -1125,7 +1226,7 @@ export default function Home() {
 
       // Wait 20 to 45 seconds before the next one
       if (i < batch.length - 1) {
-        const secs = 20 + Math.floor(Math.random() * 25);
+        const secs = 10 + Math.floor(Math.random() * 11);
         for (let s = secs; s > 0 && !stopRef.current; s--) {
           setProgress(
             `Sent ${done} of ${batch.length}. Next email in ${s}s...`,
@@ -1559,6 +1660,30 @@ export default function Home() {
                             <b>Book:</b> {r.bookTitle}
                           </p>
                         )}
+                        {(() => {
+                          const picked = a.books?.find(
+                            (b) => b.title === r.bookTitle,
+                          );
+                          if (!picked) return null;
+                          const anyRecent = a.books?.some((b) => b.recent);
+                          return picked.recent ? (
+                            <p className="text-sm font-semibold text-green-800">
+                              Published {picked.year}
+                            </p>
+                          ) : anyRecent ? (
+                            <p className="text-sm font-semibold text-amber-900">
+                              This book is from{" "}
+                              {picked.year || "an unknown year"}, so it is not
+                              recent. A newer book is in the list below.
+                            </p>
+                          ) : (
+                            <p className="text-sm font-semibold text-amber-900">
+                              Published in {picked.year || "an unknown year"}.
+                              No newer book was found, so this is the most
+                              recent one I could find.
+                            </p>
+                          );
+                        })()}
                         {r.bookWhy && (
                           <details>
                             <summary className="cursor-pointer font-semibold">
@@ -1985,13 +2110,13 @@ export default function Home() {
                     {/* Yes / No / Edit */}
                     <div className="flex flex-wrap items-center gap-2 border-t border-violet-100 pt-3">
                       <button
-                        onClick={() =>
+                        onClick={() => {
                           updateAuthor(a.email, {
                             approval: "approved",
                             editing: false,
-                          })
-                        }
-                        className={BTN}
+                          });
+                          if (!a.draft) prepareAuthor(a);
+                        }}
                       >
                         Yes, correct
                       </button>

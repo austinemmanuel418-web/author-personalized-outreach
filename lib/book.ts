@@ -5,6 +5,7 @@ export type TavilyResult = { title: string; url: string; content: string };
 export type BookInfo = {
   bookWhy: string;
   sources: { title: string; url: string }[];
+  from: string[];
 };
 
 export async function webSearch(
@@ -57,17 +58,24 @@ export async function extractPages(
   }
 }
 
-// Book pages come first, then other pages, then author pages
+// Amazon book pages first, then Goodreads book pages, then the rest
 function rank(url: string) {
   const u = url.toLowerCase();
-  if (u.includes("goodreads.com/book/show")) return 0;
   if (
     u.includes("amazon.") &&
     (u.includes("/dp/") || u.includes("/gp/product"))
   )
-    return 1;
-  if (u.includes("goodreads.com") || u.includes("amazon.")) return 3;
+    return 0;
+  if (u.includes("goodreads.com/book/show")) return 1;
+  if (u.includes("amazon.") || u.includes("goodreads.com")) return 3;
   return 2;
+}
+
+function siteName(url: string) {
+  const u = url.toLowerCase();
+  if (u.includes("amazon.")) return "Amazon";
+  if (u.includes("goodreads.com")) return "Goodreads";
+  return "the web";
 }
 
 // Reads the book pages and writes a summary of the book
@@ -75,7 +83,7 @@ export async function researchBook(
   authorName: string,
   bookTitle: string,
 ): Promise<BookInfo> {
-  const empty: BookInfo = { bookWhy: "", sources: [] };
+  const empty: BookInfo = { bookWhy: "", sources: [], from: [] };
   if (!authorName || !bookTitle) return empty;
 
   const mainTitle = bookTitle.split(":")[0].trim().toLowerCase();
@@ -84,29 +92,40 @@ export async function researchBook(
       (r.title + " " + r.content).toLowerCase().includes(mainTitle),
     );
 
-  // 1. Amazon and Goodreads first. 2. The whole web if nothing was found.
-  let found: TavilyResult[] = [];
-  try {
-    found = keep(
-      await webSearch(`${bookTitle} ${authorName} book`, [
-        "goodreads.com",
-        "amazon.com",
-        "amazon.co.uk",
-        "amazon.ca",
-      ]),
-    );
-  } catch {}
+  // 1. Amazon and Goodreads, searched at the same time
+  const q = `${bookTitle} ${authorName} book`;
+  const [amazon, goodreads] = await Promise.all([
+    webSearch(q, ["amazon.com", "amazon.co.uk", "amazon.ca"]).catch(
+      () => [] as TavilyResult[],
+    ),
+    webSearch(q, ["goodreads.com"]).catch(() => [] as TavilyResult[]),
+  ]);
+  let found = keep([...amazon, ...goodreads]);
+
+  // 2. The whole web if nothing was found
   if (found.length === 0) {
     found = keep(
       await webSearch(`"${bookTitle}" by ${authorName} book description`),
     );
   }
+  if (found.length === 0) return empty;
 
-  const matches = found.sort((a, b) => rank(a.url) - rank(b.url)).slice(0, 3);
-  if (matches.length === 0) return empty;
+  // Take one Amazon book page and one Goodreads book page first
+  const sorted = [...found].sort((a, b) => rank(a.url) - rank(b.url));
+  const picks: TavilyResult[] = [];
+  const take = (f: (r: TavilyResult) => boolean) => {
+    const r = sorted.find((x) => f(x) && !picks.includes(x));
+    if (r) picks.push(r);
+  };
+  take((r) => rank(r.url) === 0);
+  take((r) => rank(r.url) === 1);
+  for (const r of sorted) {
+    if (picks.length >= 3) break;
+    if (!picks.includes(r)) picks.push(r);
+  }
 
   const pages = await extractPages(
-    matches.map((m) => m.url),
+    picks.map((m) => m.url),
     `What is the book "${bookTitle}" by ${authorName} about? Story, theme, setting and description.`,
   );
   console.log(
@@ -114,7 +133,7 @@ export async function researchBook(
     pages.map((p) => `${p.url} (${p.content.length} chars)`),
   );
 
-  const searchText = matches
+  const searchText = picks
     .map((m, i) => {
       const page = pages.find((p) => p.url === m.url);
       const text = page?.content
@@ -135,7 +154,7 @@ Write a summary of this book in 3 to 5 sentences: what it is about, its main the
 
 Rules:
 - Use ONLY facts found in the pages above. Do not guess.
-- If a page has the book's description (the blurb), use it.
+- If an Amazon page has the book's description (the blurb), use it first. Then use Goodreads.
 - If there is no description, you may use what the pages clearly say about the story, theme or setting (for example from reader reviews).
 - Do NOT write about prices, sales, ranks or the number of reviews.
 - Only return an empty string if the pages say nothing about the book's story or theme.
@@ -158,6 +177,7 @@ Reply with a JSON object: { "bookWhy": "the sentences, or empty string" }`;
 
   return {
     bookWhy: String(data.bookWhy ?? ""),
-    sources: matches.map((m) => ({ title: m.title, url: m.url })),
+    sources: picks.map((m) => ({ title: m.title, url: m.url })),
+    from: [...new Set(picks.map((m) => siteName(m.url)))],
   };
 }

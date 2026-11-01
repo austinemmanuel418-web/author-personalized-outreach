@@ -76,6 +76,9 @@ type Author = {
   emailCheck?: EmailCheck;
   checking?: boolean;
   bookChecked?: boolean;
+  bookLink?: string;
+  linkLoading?: boolean;
+  linkMessage?: string;
 };
 
 const EMAIL_REGEX = /[^\s,;<>"']+@[^\s,;<>"']+\.[^\s,;<>"']+/g;
@@ -274,6 +277,7 @@ export default function Home() {
               writing: false,
               contactLoading: false,
               bookLoading: false,
+              linkLoading: false,
               checking: false,
               siteLoading: false,
               editing: false,
@@ -452,7 +456,7 @@ export default function Home() {
             bookLoading: false,
             bookChecked: true,
             bookMessage: data.bookWhy
-              ? "Book details found. Click Fill again on the email below to put them in."
+              ? `Book details found${data.from?.length ? ` (from ${data.from.join(", ")})` : ""}. Click Fill again on the email below to put them in.`
               : "No details about this book were found on the pages. Use Edit to type your own detail.",
             result: {
               ...a.result,
@@ -1099,6 +1103,68 @@ export default function Home() {
     await fillTemplate(a, { bookWhy, authorBio: bio });
   }
 
+  // Reads one exact Amazon or Goodreads page that you pasted
+  async function readBookLink(a: Author) {
+    const url = (a.bookLink ?? "").trim();
+    if (!a.result?.authorName) return;
+    if (!/^https?:\/\//i.test(url)) {
+      updateAuthor(a.email, {
+        linkMessage: "Paste the full link, starting with https://",
+      });
+      return;
+    }
+    updateAuthor(a.email, { linkLoading: true, linkMessage: "" });
+
+    try {
+      const res = await fetch("/api/book-from-link", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, authorName: a.result.authorName }),
+      });
+      const data = await res.json();
+
+      if (!res.ok) {
+        updateAuthor(a.email, {
+          linkLoading: false,
+          linkMessage: data.error || "Could not read that page.",
+        });
+        return;
+      }
+
+      setAuthors((current) =>
+        current.map((x) =>
+          x.email === a.email && x.result
+            ? {
+                ...x,
+                linkLoading: false,
+                bookChecked: true,
+                bookMessage: "",
+                linkMessage: `✅ Book details read from the link${
+                  data.title ? ` for "${data.title}"` : ""
+                }${
+                  data.year ? ` (published ${data.year})` : ""
+                }. Click Fill again on the email below.`,
+                result: {
+                  ...x.result,
+                  bookTitle: data.title || x.result.bookTitle,
+                  bookWhy: data.bookWhy || x.result.bookWhy,
+                  sources: [
+                    { title: data.title || "Book page", url },
+                    ...x.result.sources.filter((s) => s.url !== url),
+                  ],
+                },
+              }
+            : x,
+        ),
+      );
+    } catch {
+      updateAuthor(a.email, {
+        linkLoading: false,
+        linkMessage: "Could not reach the server.",
+      });
+    }
+  }
+
   const MAX_PER_RUN = 30;
 
   function hasPlaceholder(d: Draft) {
@@ -1665,18 +1731,23 @@ export default function Home() {
                             (b) => b.title === r.bookTitle,
                           );
                           if (!picked) return null;
-                          const anyRecent = a.books?.some((b) => b.recent);
-                          return picked.recent ? (
-                            <p className="text-sm font-semibold text-green-800">
-                              Published {picked.year}
-                            </p>
-                          ) : anyRecent ? (
-                            <p className="text-sm font-semibold text-amber-900">
-                              This book is from{" "}
-                              {picked.year || "an unknown year"}, so it is not
-                              recent. A newer book is in the list below.
-                            </p>
-                          ) : (
+                          const newest = a.books?.[0];
+                          if (picked.recent)
+                            return (
+                              <p className="text-sm font-semibold text-green-800">
+                                Published {picked.year}
+                              </p>
+                            );
+                          if (newest && newest.title !== picked.title)
+                            return (
+                              <p className="text-sm font-semibold text-amber-900">
+                                This book is from{" "}
+                                {picked.year || "an unknown year"}, but a newer
+                                one is in the list below: {newest.title}
+                                {newest.year ? ` (${newest.year})` : ""}.
+                              </p>
+                            );
+                          return (
                             <p className="text-sm font-semibold text-amber-900">
                               Published in {picked.year || "an unknown year"}.
                               No newer book was found, so this is the most
@@ -1789,6 +1860,34 @@ export default function Home() {
                             </p>
                           </div>
                         ))}
+                        <div className="space-y-2 rounded-lg border border-violet-200 bg-white p-3">
+                          <label className={LABEL}>
+                            Know the exact book? Paste its Amazon or Goodreads
+                            link
+                          </label>
+                          <div className="flex flex-wrap gap-2">
+                            <input
+                              value={a.bookLink ?? ""}
+                              onChange={(e) =>
+                                updateAuthor(a.email, {
+                                  bookLink: e.target.value,
+                                })
+                              }
+                              placeholder="https://www.amazon.com/dp/..."
+                              className={`${INPUT} min-w-[14rem] flex-1`}
+                            />
+                            <button
+                              onClick={() => readBookLink(a)}
+                              disabled={a.linkLoading}
+                              className={BTN_SM}
+                            >
+                              {a.linkLoading ? "Reading…" : "Read this page"}
+                            </button>
+                          </div>
+                          {a.linkMessage && (
+                            <p className="text-violet-900">{a.linkMessage}</p>
+                          )}
+                        </div>
                       </div>
                     )}
 

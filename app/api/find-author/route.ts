@@ -1,22 +1,28 @@
 import { GoogleGenAI } from "@google/genai";
 import { NextResponse } from "next/server";
+import { webSearch, type TavilyResult } from "../../../lib/book";
 
 export const maxDuration = 60;
 
-type TavilyResult = { title: string; url: string; content: string };
+const AMAZON_AUTHOR =
+  /amazon\.[a-z.]+\/(?:.*\/e\/[A-Z0-9]{8,}|.*stores\/.*author|.*\/author\/)/i;
+const GOODREADS_AUTHOR = /goodreads\.com\/author\/show\//i;
 
-async function webSearch(query: string): Promise<TavilyResult[]> {
-  const res = await fetch("https://api.tavily.com/search", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.TAVILY_API_KEY}`,
-    },
-    body: JSON.stringify({ query, search_depth: "basic", max_results: 10 }),
-  });
-  if (!res.ok) throw new Error(`Tavily error ${res.status}`);
-  const data = await res.json();
-  return data.results ?? [];
+// Finds the author's own pages on Amazon and Goodreads
+function findProfiles(results: TavilyResult[], name: string) {
+  const tokens = name
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+  const mine = results.filter((r) =>
+    tokens.every((t) =>
+      (r.title + " " + r.content + " " + r.url).toLowerCase().includes(t),
+    ),
+  );
+  return {
+    amazon: mine.find((r) => AMAZON_AUTHOR.test(r.url))?.url ?? "",
+    goodreads: mine.find((r) => GOODREADS_AUTHOR.test(r.url))?.url ?? "",
+  };
 }
 
 export async function POST(req: Request) {
@@ -38,11 +44,20 @@ export async function POST(req: Request) {
     }
 
     const hint = String(bookHint || "").trim();
-    const results = await webSearch(
-      hint
-        ? `${name} author "${hint}" book`
-        : `${name} author books Goodreads Amazon`,
-    );
+
+    // The author search and the Amazon author page search run at the same time
+    const [results, amazonResults] = await Promise.all([
+      webSearch(
+        hint
+          ? `${name} author "${hint}" book`
+          : `${name} author books Goodreads Amazon`,
+      ),
+      webSearch(`${name} author page`, ["amazon.com"]).catch(
+        () => [] as TavilyResult[],
+      ),
+    ]);
+
+    const profiles = findProfiles([...results, ...amazonResults], name);
 
     if (results.length === 0) {
       return NextResponse.json({
@@ -54,6 +69,7 @@ export async function POST(req: Request) {
         notes: "The web search found nothing for this name.",
         candidates: [],
         sources: [],
+        profiles,
       });
     }
 
@@ -76,10 +92,10 @@ ${searchText}
 Rules:
 - Use ONLY facts found in the search results. Do not guess.
 - Find the author who best matches the name. If several different authors share this name, pick the most prominent one and list the others in "candidates" (up to 3).
+- If a book is given, prefer the author of that book.
 - Pick the most unique or notable book of the main author.
 - "confidence" is how sure you are that the results are about one real author with this name.
 - If you cannot find an author, set "authorName" to an empty string and "confidence" to "none".
-- If a book is given, prefer the author of that book.
 
 Reply with a JSON object like this:
 {
@@ -127,6 +143,7 @@ Reply with a JSON object like this:
       notes: data.notes ?? "",
       candidates,
       sources: results.map((r) => ({ title: r.title, url: r.url })),
+      profiles,
     });
   } catch (err) {
     console.error(err);

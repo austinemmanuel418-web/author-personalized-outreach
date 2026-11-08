@@ -22,6 +22,7 @@ type Research = {
   candidates: Candidate[];
   sources: Source[];
   authorBio?: string;
+  profiles?: { amazon?: string; goodreads?: string };
 };
 
 type Book = {
@@ -219,6 +220,7 @@ function wait(ms: number) {
 export default function Home() {
   const [authors, setAuthors] = useState<Author[]>([]);
   const [pasted, setPasted] = useState("");
+  const [namesPasted, setNamesPasted] = useState("");
   const [error, setError] = useState("");
   const [subjectTemplate, setSubjectTemplate] = useState(DEFAULT_SUBJECT);
   const [bodyTemplate, setBodyTemplate] = useState(DEFAULT_BODY);
@@ -699,6 +701,7 @@ export default function Home() {
           contactLoading: false,
           contactMessage: `Email not found for ${authorName}. Please research it manually.`,
         });
+        // No email: look for the author's own website and contact form
         findSite(key, authorName, bookTitle);
         return;
       }
@@ -831,16 +834,14 @@ export default function Home() {
     return authors.some((x) => x.email === "name:" + name.trim().toLowerCase());
   }
 
-  // Researches every author that is not done yet, two at a time
-  async function researchAll() {
-    const todo = authors.filter(
-      (a) => a.status === "idle" || a.status === "error",
-    );
+  // Researches a list of authors, two at a time
+  async function researchList(todo: Author[], ask = false) {
     if (todo.length === 0) {
       setResearchProgress("Nothing to research.");
       return;
     }
     if (
+      ask &&
       !confirm(
         `Research ${todo.length} authors? Keep this tab open until it finishes.`,
       )
@@ -850,7 +851,6 @@ export default function Home() {
     const WORKERS = 2; // set to 1 if you often see "Rate limit reached"
     stopResearchRef.current = false;
     setResearchingAll(true);
-    setError("");
     let ok = 0;
     let failed = 0;
     let finished = 0;
@@ -889,6 +889,64 @@ export default function Home() {
         ? `Stopped. ${ok} researched, ${failed} failed.`
         : `Finished. ${ok} researched, ${failed} failed.`,
     );
+  }
+
+  // The "Research all" button
+  function researchAll() {
+    setError("");
+    return researchList(
+      authors.filter((a) => a.status === "idle" || a.status === "error"),
+      true,
+    );
+  }
+
+  // Adds many author names at once, then researches them
+  async function addNames() {
+    const MAX_NAMES = 30;
+    const lines = namesPasted
+      .split("\n")
+      .map((l) => l.replace(/^[\s\d.)\-•*]+/, "").trim())
+      .filter((l) => l.length >= 3 && !l.includes("@"));
+
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const l of lines) {
+      const k = l.toLowerCase();
+      if (!seen.has(k)) {
+        seen.add(k);
+        names.push(l);
+      }
+    }
+    if (names.length === 0) {
+      setError("No author names found in the box.");
+      return;
+    }
+
+    const existing = new Set(authors.map((a) => a.email));
+    const notListed = names.filter(
+      (n) => !existing.has("name:" + n.toLowerCase()),
+    );
+    if (notListed.length === 0) {
+      setError("These authors are already in your list.");
+      return;
+    }
+
+    const fresh = notListed.slice(0, MAX_NAMES);
+    const newOnes: Author[] = fresh.map((n) => ({
+      email: "name:" + n.toLowerCase(),
+      name: n,
+      status: "idle",
+      byName: true,
+    }));
+
+    setError(
+      notListed.length > MAX_NAMES
+        ? `Only the first ${MAX_NAMES} names were added. Add the rest in a second round.`
+        : "",
+    );
+    setAuthors((current) => [...current, ...newOnes]);
+    setNamesPasted("");
+    await researchList(newOnes);
   }
 
   // Changes the email draft of one author (used when you edit it)
@@ -1349,8 +1407,29 @@ export default function Home() {
                 Search
               </button>
             </div>
+
             <p className="mt-1 text-xs text-gray-600">
               Finds the author, their best-known book and a public email.
+            </p>
+          </div>
+          <div>
+            <label htmlFor="bulknames" className={LABEL}>
+              Search many authors by name (one name per line, up to 30)
+            </label>
+            <textarea
+              id="bulknames"
+              value={namesPasted}
+              onChange={(e) => setNamesPasted(e.target.value)}
+              rows={4}
+              placeholder={"Kathryn Andrews\nJohn Van Stry\nPam Russ"}
+              className={INPUT}
+            />
+            <button onClick={addNames} className={`${BTN} mt-2`}>
+              Add names and research
+            </button>
+            <p className="mt-1 text-xs text-gray-600">
+              Each name: finds the author, their books, their Amazon page, an
+              email, and a website contact form if there is no email.
             </p>
           </div>
 
@@ -1658,6 +1737,34 @@ export default function Home() {
                             (confidence: {r.confidence})
                           </span>
                         </p>
+                        {(r.profiles?.amazon || r.profiles?.goodreads) && (
+                          <p className="text-sm">
+                            <b>Author pages:</b>{" "}
+                            {r.profiles?.amazon && (
+                              <a
+                                href={r.profiles.amazon}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-violet-700 underline"
+                              >
+                                Amazon
+                              </a>
+                            )}
+                            {r.profiles?.amazon &&
+                              r.profiles?.goodreads &&
+                              " · "}
+                            {r.profiles?.goodreads && (
+                              <a
+                                href={r.profiles.goodreads}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="text-violet-700 underline"
+                              >
+                                Goodreads
+                              </a>
+                            )}
+                          </p>
+                        )}
                         {r.bookTitle && (
                           <p>
                             <b>Book:</b> {r.bookTitle}

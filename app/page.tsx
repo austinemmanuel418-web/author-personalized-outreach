@@ -233,6 +233,7 @@ export default function Home() {
   const stopResearchRef = useRef(false);
   const [authorsLoaded, setAuthorsLoaded] = useState(false);
   const [nameQuery, setNameQuery] = useState("");
+  const [dark, setDark] = useState(false);
 
   // Load the saved template when the page opens
   useEffect(() => {
@@ -1159,6 +1160,19 @@ export default function Home() {
 
     await fillTemplate(a, { bookWhy, authorBio: bio });
   }
+  // Dark mode: read the current theme when the page opens
+  useEffect(() => {
+    setDark(document.documentElement.classList.contains("dark"));
+  }, []);
+
+  function toggleDark() {
+    const next = !dark;
+    setDark(next);
+    document.documentElement.classList.toggle("dark", next);
+    try {
+      localStorage.setItem("theme", next ? "dark" : "light");
+    } catch {}
+  }
 
   const MAX_PER_RUN = 30;
 
@@ -1355,6 +1369,13 @@ export default function Home() {
           <span className={`${BADGE} bg-violet-100 text-violet-900`}>
             {sentCount} sent
           </span>
+          <button
+            onClick={toggleDark}
+            aria-pressed={dark}
+            className="rounded-full border border-violet-300 bg-white px-3 py-1 text-xs font-semibold text-violet-700"
+          >
+            {dark ? "Light mode" : "Dark mode"}
+          </button>
         </div>
       </header>
 

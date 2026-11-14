@@ -1152,6 +1152,31 @@ export default function SheetPage() {
                                   Send test to me
                                 </button>
                                 <button
+                                  onClick={() => sendOneClick(r)}
+                                  disabled={
+                                    r.status === "sending" ||
+                                    r.status === "sent" ||
+                                    r.filling
+                                  }
+                                  className={BTN}
+                                >
+                                  {r.status === "sending"
+                                    ? "Sending…"
+                                    : r.status === "sent"
+                                      ? "Sent"
+                                      : "Send to author"}
+                                </button>
+                                {r.status === "sent" && (
+                                  <span className="font-semibold text-green-700">
+                                    ✅ Sent
+                                  </span>
+                                )}
+                                {r.status === "failed" && r.error && (
+                                  <span className="text-red-700">
+                                    {r.error}
+                                  </span>
+                                )}
+                                <button
                                   onClick={() => aiFill(r)}
                                   disabled={r.filling}
                                   className={BTN_OUT}

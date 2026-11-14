@@ -87,10 +87,18 @@ export async function researchBook(
   if (!authorName || !bookTitle) return empty;
 
   const mainTitle = bookTitle.split(":")[0].trim().toLowerCase();
+  const nameParts = authorName
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((t) => t.length > 2);
+  const lastName = nameParts[nameParts.length - 1] || "";
+
+  // Keep only pages that mention the book AND the author
   const keep = (rs: TavilyResult[]) =>
-    rs.filter((r) =>
-      (r.title + " " + r.content).toLowerCase().includes(mainTitle),
-    );
+    rs.filter((r) => {
+      const t = (r.title + " " + r.content + " " + r.url).toLowerCase();
+      return t.includes(mainTitle) && (!lastName || t.includes(lastName));
+    });
 
   // 1. Amazon and Goodreads, searched at the same time
   const q = `${bookTitle} ${authorName} book`;
@@ -158,6 +166,7 @@ Rules:
 - If there is no description, you may use what the pages clearly say about the story, theme or setting (for example from reader reviews).
 - Do NOT write about prices, sales, ranks or the number of reviews.
 - Only return an empty string if the pages say nothing about the book's story or theme.
+- Ignore any page that is about a different book or a different author. Only use pages that are clearly about this exact book by this author.
 
 Reply with a JSON object: { "bookWhy": "the sentences, or empty string" }`;
 

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Papa from "papaparse";
+import Link from "next/link";
 
 type Source = { title: string; url: string };
 
@@ -1376,6 +1377,12 @@ export default function Home() {
           >
             {dark ? "Light mode" : "Dark mode"}
           </button>
+          <Link
+            href="/sheet"
+            className="rounded-full border border-violet-300 bg-white px-3 py-1 text-xs font-semibold text-violet-700"
+          >
+            Sheet mode
+          </Link>
         </div>
       </header>
 

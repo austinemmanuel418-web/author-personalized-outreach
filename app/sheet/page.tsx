@@ -9,27 +9,61 @@ type Draft = { subject: string; body: string };
 type Row = {
   id: string;
   cells: Record<string, string>;
-  draft?: Draft;
+  draft?: Draft; // the filled or edited email
   open?: boolean;
+  filling?: boolean;
+  fillError?: string;
   status?: "sending" | "sent" | "failed";
   error?: string;
 };
 
-type Mapping = { name: string; email: string; book: string };
+type Mapping = {
+  name: string;
+  email: string;
+  book: string;
+  desc: string;
+  more: string;
+};
+
+const EMPTY_MAP: Mapping = {
+  name: "",
+  email: "",
+  book: "",
+  desc: "",
+  more: "",
+};
 
 const TEMPLATE_KEY = "emailTemplate";
 const DATA_KEY = "sheetData";
 const SENT_KEY = "sentEmails";
+const SENDER_KEY = "senderName";
 
 const DEFAULT_SUBJECT = "Feature draft for [Book Title]";
-const DEFAULT_BODY = `Hello [First Name],
+const DEFAULT_BODY = `Hello [Author First Name],
 
-I recently came across [Book Title] and wanted to reach out.
+I recently came across [Book Title], and what caught my attention was [Interesting Book Detail].
 
-Write your message here. You can use any column name from your sheet as a placeholder, like [Year] or [Website].
+Write the rest of your message here.
 
-Best regards,
-Your Name`;
+Warm regards,
+[Name]`;
+
+// Words that always mean "me, the sender"
+const SENDER_KEYS = ["name", "your name", "sender name", "sender", "my name"];
+// Words the app fills by itself from the sheet
+const KNOWN_KEYS = [
+  "author name",
+  "author",
+  "full name",
+  "first name",
+  "author first name",
+  "greeting first name",
+  "greeting",
+  "book title",
+  "book",
+  "title",
+  "book name",
+];
 
 // ---------- Look and feel ----------
 const CARD = "rounded-2xl border border-violet-100 bg-white p-6 shadow-sm";
@@ -82,25 +116,32 @@ function norm(s: string) {
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
-function guessCol(cols: string[], patterns: RegExp[]) {
+// Plain emails cannot show bold or italic, so remove the *stars*
+function clean(t: string) {
+  return t.replace(/\*\*([^*\n]+)\*\*/g, "$1").replace(/\*([^*\n]+)\*/g, "$1");
+}
+function brackets(t: string): string[] {
+  return [...new Set(t.match(/\[[^\]]+\]/g) || [])];
+}
+function guessCol(cols: string[], patterns: RegExp[], exclude?: RegExp) {
   for (const p of patterns) {
-    const hit = cols.find((c) => p.test(norm(c)));
+    const hit = cols.find(
+      (c) => p.test(norm(c)) && !(exclude && exclude.test(norm(c))),
+    );
     if (hit) return hit;
   }
   return "";
 }
-function hasPlaceholder(d: Draft) {
-  return /\[[^\]]+\]/.test(d.subject + d.body);
-}
 
-const MIN_WAIT = 5; // seconds between emails
-const MAX_WAIT = 10;
+const MIN_WAIT = 10; // seconds between emails
+const MAX_WAIT = 20;
 const MAX_PER_RUN = 30;
 
 export default function SheetPage() {
   const [columns, setColumns] = useState<string[]>([]);
   const [rows, setRows] = useState<Row[]>([]);
-  const [map, setMap] = useState<Mapping>({ name: "", email: "", book: "" });
+  const [map, setMap] = useState<Mapping>(EMPTY_MAP);
+  const [sender, setSender] = useState("");
   const [tSubject, setTSubject] = useState(DEFAULT_SUBJECT);
   const [tBody, setTBody] = useState(DEFAULT_BODY);
   const [loaded, setLoaded] = useState(false);
@@ -110,7 +151,7 @@ export default function SheetPage() {
   const stopRef = useRef(false);
   const [dark, setDark] = useState(false);
 
-  // Load the saved template and the saved table
+  // Load everything that was saved
   useEffect(() => {
     try {
       const t = localStorage.getItem(TEMPLATE_KEY);
@@ -123,20 +164,22 @@ export default function SheetPage() {
       if (d) {
         const p = JSON.parse(d);
         setColumns(p.columns ?? []);
-        setMap(p.map ?? { name: "", email: "", book: "" });
+        setMap({ ...EMPTY_MAP, ...(p.map ?? {}) });
         setRows(
           (p.rows ?? []).map((r: Row) => ({
             ...r,
+            filling: false,
             status: r.status === "sending" ? undefined : r.status,
           })),
         );
       }
+      const s = localStorage.getItem(SENDER_KEY);
+      if (s) setSender(s);
     } catch {}
     setDark(document.documentElement.classList.contains("dark"));
     setLoaded(true);
   }, []);
 
-  // Save the template when you change it
   useEffect(() => {
     if (!loaded) return;
     try {
@@ -147,13 +190,19 @@ export default function SheetPage() {
     } catch {}
   }, [tSubject, tBody, loaded]);
 
-  // Save the table when you change it
   useEffect(() => {
     if (!loaded) return;
     try {
       localStorage.setItem(DATA_KEY, JSON.stringify({ columns, rows, map }));
     } catch {}
   }, [columns, rows, map, loaded]);
+
+  useEffect(() => {
+    if (!loaded) return;
+    try {
+      localStorage.setItem(SENDER_KEY, sender);
+    } catch {}
+  }, [sender, loaded]);
 
   function toggleDark() {
     const next = !dark;
@@ -162,6 +211,18 @@ export default function SheetPage() {
     try {
       localStorage.setItem("theme", next ? "dark" : "light");
     } catch {}
+  }
+
+  // The brackets Gemini should write (not names, not sheet columns)
+  const slots = aiSlotsOf(tSubject + "\n" + tBody);
+
+  function aiSlotsOf(text: string): string[] {
+    return brackets(text).filter((s) => {
+      const k = norm(s.slice(1, -1));
+      if (SENDER_KEYS.includes(k) || KNOWN_KEYS.includes(k)) return false;
+      if (columns.some((c) => norm(c) === k)) return false;
+      return true;
+    });
   }
 
   // ---------- Table ----------
@@ -174,6 +235,17 @@ export default function SheetPage() {
       cur.map((r) =>
         r.id === id ? { ...r, cells: { ...r.cells, [col]: value } } : r,
       ),
+    );
+  }
+
+  // Changing the template clears the filled emails, so they are filled again
+  function changeTemplate(subject: string, body: string) {
+    setTSubject(subject);
+    setTBody(body);
+    setRows((cur) =>
+      cur.some((r) => r.draft)
+        ? cur.map((r) => ({ ...r, draft: undefined, fillError: "" }))
+        : cur,
     );
   }
 
@@ -204,22 +276,56 @@ export default function SheetPage() {
             ),
           })),
         );
+
+        // Guess which column is which
         setMap({
-          name: guessCol(cols, [
-            /^author( name)?$/,
-            /^(full )?name$/,
-            /author/,
-            /name/,
-          ]),
-          email: guessCol(cols, [/^e ?mail( address)?$/, /e ?mail/]),
-          book: guessCol(cols, [
-            /(recent|latest|newest|current|new).*(book|title)/,
-            /^book( title)?$/,
-            /book/,
-            /title/,
-          ]),
+          name: guessCol(
+            cols,
+            [
+              /^author( name)?$/,
+              /^(full )?name$/,
+              /author name|author/,
+              /name/,
+            ],
+            /(url|link|source|status|type|note|date|country|region|first|greeting|book|title|email)/,
+          ),
+          email: guessCol(
+            cols,
+            [
+              /^e ?mail( address)?$/,
+              /(public|professional|author|contact).*e ?mail/,
+              /e ?mail/,
+            ],
+            /(url|link|source|status|type|verif|note|draft|subject)/,
+          ),
+          book: guessCol(
+            cols,
+            [
+              /^book( title)?$/,
+              /(recent|latest|newest).*(book|title)/,
+              /book.*title|^title/,
+              /book/,
+            ],
+            /(url|link|source|desc|theme|synopsis|detail|angle|status|amazon|country|date)/,
+          ),
+          desc: guessCol(
+            cols,
+            [
+              /book.*(desc|synopsis|theme|summary)/,
+              /(desc|synopsis|summary)/,
+              /theme/,
+            ],
+            /(url|link|source)/,
+          ),
+          more: guessCol(
+            cols,
+            [/angle/, /personali[sz]ation/],
+            /(draft|message|subject|email)/,
+          ),
         });
-        setProgress("");
+        setProgress(
+          `Loaded ${res.data.length} rows. Check the columns above, then fill and send.`,
+        );
       },
       error: () => setError("Could not read this file."),
     });
@@ -233,7 +339,7 @@ export default function SheetPage() {
 
   function addRow() {
     if (columns.length === 0) {
-      setError("Upload a CSV first, or add a column.");
+      setError("Upload a CSV first.");
       return;
     }
     setRows((cur) => [
@@ -266,7 +372,7 @@ export default function SheetPage() {
     if (!confirm("Remove the whole table?")) return;
     setRows([]);
     setColumns([]);
-    setMap({ name: "", email: "", book: "" });
+    setMap(EMPTY_MAP);
   }
 
   function downloadCsv() {
@@ -283,21 +389,37 @@ export default function SheetPage() {
     URL.revokeObjectURL(url);
   }
 
-  // ---------- Filling the template ----------
+  // ---------- Reading a row ----------
+  function cell(row: Row, col: string) {
+    return col ? (row.cells[col] ?? "").trim() : "";
+  }
   function emailOf(row: Row) {
-    return (row.cells[map.email] ?? "").trim();
+    return cell(row, map.email);
+  }
+  // The facts Gemini may use for this row
+  function descOf(row: Row) {
+    return [cell(row, map.desc), cell(row, map.more)].filter(Boolean).join(" ");
   }
 
-  // The value for a [placeholder]. A column with that name wins.
+  // The value for one [placeholder]. Returns null when it cannot be filled.
   function valueFor(row: Row, key: string): string | null {
-    const col = columns.find((c) => norm(c) === key);
-    if (col) return (row.cells[col] ?? "").trim() || null;
+    if (SENDER_KEYS.includes(key)) return sender.trim() || null;
 
-    const name = (row.cells[map.name] ?? "").trim();
-    const book = (row.cells[map.book] ?? "").trim();
-    if (["author name", "author", "name", "full name"].includes(key))
+    const col = columns.find((c) => norm(c) === key);
+    if (col) return cell(row, col) || null;
+
+    const name = cell(row, map.name);
+    const book = cell(row, map.book);
+    if (["author name", "author", "full name"].includes(key))
       return name || null;
-    if (["first name", "author first name"].includes(key))
+    if (
+      [
+        "first name",
+        "author first name",
+        "greeting first name",
+        "greeting",
+      ].includes(key)
+    )
       return name.split(/\s+/)[0] || null;
     if (["book title", "book", "title", "book name"].includes(key))
       return book || null;
@@ -305,32 +427,55 @@ export default function SheetPage() {
   }
 
   function fill(text: string, row: Row) {
-    const out = text.replace(
-      /\[([^\]]+)\]/g,
-      (whole, inner: string) => valueFor(row, norm(inner)) ?? whole,
+    return clean(
+      text.replace(
+        /\[([^\]]+)\]/g,
+        (whole, inner: string) => valueFor(row, norm(inner)) ?? whole,
+      ),
     );
-    // Plain emails cannot show bold or italic, so remove the *stars*
-    return out
-      .replace(/\*\*([^*\n]+)\*\*/g, "$1")
-      .replace(/\*([^*\n]+)\*/g, "$1");
   }
 
-  function generated(row: Row): Draft {
+  function basicDraft(row: Row): Draft {
     return { subject: fill(tSubject, row), body: fill(tBody, row) };
   }
 
+  // What will be sent (and shown in the preview)
   function contentOf(row: Row): Draft {
-    return row.draft ?? generated(row);
+    return row.draft ?? basicDraft(row);
   }
 
-  function siteOf(row: Row) {
-    for (const c of columns) {
-      if (/website|contact|url|link|site/.test(norm(c))) {
-        const v = (row.cells[c] ?? "").trim();
-        if (/^https?:\/\//i.test(v)) return v;
-      }
-    }
+  // True when Gemini still has to fill the blanks for this row
+  function needsFill(row: Row) {
+    return !row.draft && slots.length > 0 && !!descOf(row);
+  }
+
+  // The reason a row cannot be sent. Empty text means it is fine.
+  function problemOf(row: Row): string {
+    const d = contentOf(row);
+    if (!d.subject.trim() || !d.body.trim()) return "Message is empty";
+    const left = brackets(d.subject + "\n" + d.body);
+    if (left.length === 0) return "";
+
+    const known = left.filter((s) => !slots.includes(s));
+    if (known.some((s) => SENDER_KEYS.includes(norm(s.slice(1, -1)))))
+      return "Type your name above";
+    if (known.length > 0) return `Missing ${known[0]}`;
+
+    // Only blanks for Gemini are left
+    if (row.draft) return `Still missing ${left[0]}`;
+    if (!descOf(row)) return "No book description";
     return "";
+  }
+
+  function isReady(row: Row) {
+    const to = emailOf(row);
+    return (
+      row.status !== "sent" &&
+      !row.filling &&
+      validEmail(to) &&
+      !wasSent(to) &&
+      !problemOf(row)
+    );
   }
 
   function badge(row: Row): { text: string; cls: string } {
@@ -340,51 +485,175 @@ export default function SheetPage() {
       return { text: "Sending…", cls: "bg-violet-100 text-violet-900" };
     if (row.status === "failed")
       return { text: "Failed", cls: "bg-red-100 text-red-800" };
+    if (row.filling)
+      return { text: "Filling…", cls: "bg-violet-100 text-violet-900" };
     const to = emailOf(row);
     if (!to) return { text: "No email", cls: "bg-amber-100 text-amber-900" };
     if (!validEmail(to))
       return { text: "Invalid email", cls: "bg-red-100 text-red-800" };
-    if (hasPlaceholder(contentOf(row)))
-      return { text: "Missing info", cls: "bg-amber-100 text-amber-900" };
+    const problem = problemOf(row);
+    if (problem) return { text: problem, cls: "bg-amber-100 text-amber-900" };
     if (wasSent(to))
       return { text: "Emailed before", cls: "bg-amber-100 text-amber-900" };
-    return { text: "Ready", cls: "bg-green-100 text-green-800" };
+    return {
+      text: needsFill(row) ? "Ready (Gemini fills)" : "Ready",
+      cls: "bg-green-100 text-green-800",
+    };
   }
 
-  function isReady(row: Row) {
-    const to = emailOf(row);
-    return (
-      row.status !== "sent" &&
-      validEmail(to) &&
-      !hasPlaceholder(contentOf(row)) &&
-      !wasSent(to)
-    );
+  // The author's website or contact page, for the "Open site" button
+  function siteOf(row: Row) {
+    for (const c of columns) {
+      const k = norm(c);
+      if (
+        /(website|contact|homepage|author page|author site)/.test(k) &&
+        !/(source|amazon|email)/.test(k)
+      ) {
+        const v = cell(row, c);
+        if (/^https?:\/\//i.test(v)) return v;
+      }
+    }
+    return "";
+  }
+
+  // ---------- Gemini fills the blanks (from the sheet, no web search) ----------
+  async function aiFill(row: Row): Promise<Draft | null> {
+    const base = basicDraft(row);
+    const todo = slots.filter((s) => (base.subject + base.body).includes(s));
+
+    if (todo.length === 0) {
+      patchRow(row.id, { draft: base, fillError: "" });
+      return base;
+    }
+    const desc = descOf(row);
+    if (!desc) {
+      patchRow(row.id, { fillError: "This row has no book description." });
+      return null;
+    }
+
+    patchRow(row.id, { filling: true, fillError: "" });
+    const payload = JSON.stringify({
+      template: base.body,
+      placeholders: todo,
+      authorName: cell(row, map.name),
+      bookTitle: cell(row, map.book),
+      bookWhy: desc,
+      authorBio: "",
+    });
+    const call = () =>
+      fetch("/api/fill-detail", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: payload,
+      });
+
+    try {
+      let res = await call();
+      if (res.status === 429) {
+        patchRow(row.id, { fillError: "Rate limit. Waiting 30 seconds…" });
+        await wait(30000);
+        res = await call();
+      }
+      const data = await res.json();
+      if (!res.ok || !Array.isArray(data.details)) {
+        patchRow(row.id, {
+          filling: false,
+          fillError: data.error || "Gemini could not fill this email.",
+        });
+        return null;
+      }
+
+      const values: Record<string, string> = {};
+      todo.forEach((s, i) => {
+        values[s] = String(data.details[i] ?? "").trim();
+      });
+      const apply = (t: string) => {
+        let out = t;
+        for (const [s, v] of Object.entries(values)) {
+          if (v) out = out.split(s).join(v);
+        }
+        return clean(out);
+      };
+      const d: Draft = { subject: apply(base.subject), body: apply(base.body) };
+      const left = brackets(d.subject + "\n" + d.body).filter((s) =>
+        slots.includes(s),
+      );
+      patchRow(row.id, {
+        filling: false,
+        draft: d,
+        fillError: left.length
+          ? `Gemini left ${left[0]} empty. Type it in the preview.`
+          : "",
+      });
+      return d;
+    } catch {
+      patchRow(row.id, {
+        filling: false,
+        fillError: "Could not reach the server.",
+      });
+      return null;
+    }
+  }
+
+  async function ensureDraft(row: Row): Promise<Draft> {
+    if (needsFill(row)) {
+      const d = await aiFill(row);
+      if (d) return d;
+    }
+    return contentOf(row);
+  }
+
+  async function fillAllAi() {
+    const todo = rows.filter((r) => needsFill(r));
+    if (todo.length === 0) {
+      setProgress("Nothing to fill.");
+      return;
+    }
+    setError("");
+    for (let i = 0; i < todo.length; i++) {
+      setProgress(`Gemini is filling ${i + 1} of ${todo.length}…`);
+      await aiFill(todo[i]);
+      await wait(1000);
+    }
+    setProgress("Done. Open Preview on a row to read its email.");
+  }
+
+  async function togglePreview(row: Row) {
+    const opening = !row.open;
+    patchRow(row.id, { open: opening });
+    if (opening && needsFill(row)) await aiFill(row);
   }
 
   // ---------- Sending ----------
   async function sendRow(row: Row, test = false): Promise<boolean> {
     const to = emailOf(row);
-    const d = contentOf(row);
 
-    if (hasPlaceholder(d)) {
-      const msg = `Some text is still missing, like ${
-        (d.subject + d.body).match(/\[[^\]]+\]/)?.[0]
-      }.`;
+    const fail = (msg: string) => {
       if (test) setError(msg);
       else patchRow(row.id, { status: "failed", error: msg });
       return false;
-    }
-    if (!test && !validEmail(to)) {
-      patchRow(row.id, {
-        status: "failed",
-        error: "There is no valid email address.",
-      });
-      return false;
-    }
+    };
+
+    if (!test && !validEmail(to))
+      return fail("There is no valid email address.");
 
     setError("");
+    if (!test) patchRow(row.id, { status: "sending", error: "" });
+
+    const d = await ensureDraft(row);
+    if (!d.subject.trim() || !d.body.trim())
+      return fail("The subject or the message is empty.");
+
+    const left = brackets(d.subject + "\n" + d.body);
+    if (left.length > 0) {
+      return fail(
+        SENDER_KEYS.includes(norm(left[0].slice(1, -1)))
+          ? `Type your name in "Your name" above (it fills ${left[0]}).`
+          : `Some text is still missing, like ${left[0]}.`,
+      );
+    }
+
     if (!test) {
-      patchRow(row.id, { status: "sending", error: "" });
       // Check that the address can receive email
       try {
         const r = await fetch("/api/check-email", {
@@ -393,10 +662,7 @@ export default function SheetPage() {
           body: JSON.stringify({ email: to }),
         });
         const c = await r.json();
-        if (c.level === "bad") {
-          patchRow(row.id, { status: "failed", error: c.message });
-          return false;
-        }
+        if (c.level === "bad") return fail(c.message);
       } catch {}
     }
 
@@ -404,24 +670,11 @@ export default function SheetPage() {
       const res = await fetch("/api/send-email", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          to,
-          subject: d.subject,
-          body: d.body,
-          test,
-        }),
+        body: JSON.stringify({ to, subject: d.subject, body: d.body, test }),
       });
       const data = await res.json();
 
-      if (!res.ok) {
-        if (test) setError(data.error || "Could not send the test.");
-        else
-          patchRow(row.id, {
-            status: "failed",
-            error: data.error || "Could not send.",
-          });
-        return false;
-      }
+      if (!res.ok) return fail(data.error || "Could not send.");
 
       if (test) {
         setProgress("✅ Test email sent to your own inbox. Go and check it.");
@@ -431,13 +684,7 @@ export default function SheetPage() {
       patchRow(row.id, { status: "sent", error: "" });
       return true;
     } catch {
-      if (test) setError("Could not reach the server.");
-      else
-        patchRow(row.id, {
-          status: "failed",
-          error: "Could not reach the server.",
-        });
-      return false;
+      return fail("Could not reach the server.");
     }
   }
 
@@ -520,11 +767,15 @@ export default function SheetPage() {
   const withEmail = rows.filter((r) => validEmail(emailOf(r))).length;
   const readyCount = rows.filter(isReady).length;
   const sentCount = rows.filter((r) => r.status === "sent").length;
+  const fillCount = rows.filter((r) => needsFill(r)).length;
+  const noDescCount = rows.filter((r) => !descOf(r)).length;
 
   const mapFields: { key: keyof Mapping; label: string }[] = [
-    { key: "name", label: "Author name column" },
-    { key: "email", label: "Email column" },
-    { key: "book", label: "Book column (used for [Book Title])" },
+    { key: "name", label: "Author name" },
+    { key: "email", label: "Email" },
+    { key: "book", label: "Book title (fills [Book Title])" },
+    { key: "desc", label: "Book description (Gemini uses it)" },
+    { key: "more", label: "More facts, optional (Gemini uses it)" },
   ];
 
   return (
@@ -533,7 +784,8 @@ export default function SheetPage() {
         <div>
           <h1 className="text-2xl font-extrabold">Sheet mode</h1>
           <p className="text-sm text-gray-600">
-            Upload your researched sheet, edit it, and send personal emails.
+            Upload your researched sheet. Gemini fills your template from the
+            book description, then you send.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -552,7 +804,7 @@ export default function SheetPage() {
         </p>
       )}
 
-      {/* Upload */}
+      {/* 1. Upload */}
       <section className={`${CARD} space-y-4`}>
         <h2 className="text-lg font-bold">1. Upload your sheet</h2>
         <label
@@ -580,51 +832,60 @@ export default function SheetPage() {
         </label>
 
         {columns.length > 0 && (
-          <div className="grid gap-3 md:grid-cols-3">
-            {mapFields.map((f) => (
-              <div key={f.key}>
-                <label className={LABEL}>{f.label}</label>
-                <select
-                  value={map[f.key]}
-                  onChange={(e) => setMap({ ...map, [f.key]: e.target.value })}
-                  className={INPUT}
-                >
-                  <option value="">(none)</option>
-                  {columns.map((c) => (
-                    <option key={c} value={c}>
-                      {c}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            ))}
+          <div className="space-y-2">
+            <p className="text-sm text-gray-600">
+              The app guessed which column is which. Check them, and change any
+              that are wrong.
+            </p>
+            <div className="grid gap-3 md:grid-cols-2">
+              {mapFields.map((f) => (
+                <div key={f.key}>
+                  <label className={LABEL}>{f.label}</label>
+                  <select
+                    value={map[f.key]}
+                    onChange={(e) =>
+                      setMap({ ...map, [f.key]: e.target.value })
+                    }
+                    className={INPUT}
+                  >
+                    <option value="">(none)</option>
+                    {columns.map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </section>
 
-      {/* Template */}
+      {/* 2. Template */}
       <section className={`${CARD} space-y-3`}>
         <div>
           <h2 className="text-lg font-bold">2. Your email template</h2>
           <p className="text-sm text-gray-600">
-            Saved in your browser, and shared with the research page. Use
-            [Author Name], [First Name], [Book Title], or any column name in
-            square brackets, like [Year] or [Website].
+            Saved in your browser, and shared with the research page. [Author
+            Name], [Author First Name] and [Book Title] are filled from the
+            sheet, [Name] is you, and any column name in square brackets fills
+            from that column. Gemini writes every other bracket from the book
+            description. Changing the template clears the emails already filled.
           </p>
         </div>
-        {columns.length > 0 && (
-          <p className="text-xs text-gray-600">
-            Your columns:{" "}
-            {columns.map((c) => (
-              <span
-                key={c}
-                className={`${BADGE} mr-1 inline-block bg-violet-100 text-violet-900`}
-              >
-                [{c}]
-              </span>
-            ))}
-          </p>
-        )}
+        <div className="max-w-md">
+          <label htmlFor="sender" className={LABEL}>
+            Your name (fills [Name] at the end of the email)
+          </label>
+          <input
+            id="sender"
+            value={sender}
+            onChange={(e) => setSender(e.target.value)}
+            placeholder="Your name"
+            className={INPUT}
+          />
+        </div>
         <div>
           <label htmlFor="tsub" className={LABEL}>
             Subject
@@ -632,7 +893,7 @@ export default function SheetPage() {
           <input
             id="tsub"
             value={tSubject}
-            onChange={(e) => setTSubject(e.target.value)}
+            onChange={(e) => changeTemplate(e.target.value, tBody)}
             className={INPUT}
           />
         </div>
@@ -643,26 +904,28 @@ export default function SheetPage() {
           <textarea
             id="tbody"
             value={tBody}
-            onChange={(e) => setTBody(e.target.value)}
+            onChange={(e) => changeTemplate(tSubject, e.target.value)}
             rows={12}
             className={INPUT}
           />
         </div>
+        {slots.length > 0 && (
+          <p className="text-xs text-gray-600">
+            Gemini will write: {slots.join(" · ")}
+          </p>
+        )}
         <button
-          onClick={() => {
-            setTSubject(DEFAULT_SUBJECT);
-            setTBody(DEFAULT_BODY);
-          }}
+          onClick={() => changeTemplate(DEFAULT_SUBJECT, DEFAULT_BODY)}
           className="text-sm font-semibold text-gray-600 underline"
         >
           Reset to the example
         </button>
       </section>
 
-      {/* Table */}
+      {/* 3. Table */}
       <section className={`${CARD} space-y-4`}>
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 className="text-lg font-bold">3. Edit and send</h2>
+          <h2 className="text-lg font-bold">3. Fill and send</h2>
           <div className="flex flex-wrap gap-2">
             <span className={`${BADGE} bg-violet-100 text-violet-900`}>
               {rows.length} rows
@@ -675,6 +938,13 @@ export default function SheetPage() {
             </span>
           </div>
         </div>
+
+        {rows.length > 0 && noDescCount > 0 && slots.length > 0 && (
+          <p className="rounded-lg bg-amber-100 p-2 text-sm text-amber-900">
+            {noDescCount} rows have no book description, so Gemini cannot fill
+            their blanks. Check the &quot;Book description&quot; column above.
+          </p>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           <button onClick={addRow} className={BTN_OUT}>
@@ -701,9 +971,16 @@ export default function SheetPage() {
 
         <div className="flex flex-wrap items-center gap-3">
           <button
+            onClick={fillAllAi}
+            disabled={sendingAll || fillCount === 0}
+            className={BTN}
+          >
+            Fill all with Gemini ({fillCount})
+          </button>
+          <button
             onClick={sendAllReady}
             disabled={sendingAll || readyCount === 0}
-            className={BTN}
+            className={BTN_OUT}
           >
             Send all ready ({readyCount})
           </button>
@@ -739,6 +1016,7 @@ export default function SheetPage() {
                       {c === map.name && " (name)"}
                       {c === map.email && " (email)"}
                       {c === map.book && " (book)"}
+                      {c === map.desc && " (description)"}
                     </th>
                   ))}
                   <th className="p-2">Actions</th>
@@ -749,15 +1027,16 @@ export default function SheetPage() {
                   const b = badge(r);
                   const d = contentOf(r);
                   const site = siteOf(r);
+                  const stillLeft = brackets(d.subject + "\n" + d.body);
                   return (
                     <Fragment key={r.id}>
                       <tr className="border-t border-violet-100 align-top">
                         <td className="p-2">{i + 1}</td>
                         <td className="p-2">
                           <span className={`${BADGE} ${b.cls}`}>{b.text}</span>
-                          {r.error && (
+                          {(r.error || r.fillError) && (
                             <p className="mt-1 max-w-[14rem] text-xs text-red-700">
-                              {r.error}
+                              {r.error || r.fillError}
                             </p>
                           )}
                         </td>
@@ -779,7 +1058,7 @@ export default function SheetPage() {
                         <td className="p-2">
                           <div className="flex flex-wrap gap-1">
                             <button
-                              onClick={() => patchRow(r.id, { open: !r.open })}
+                              onClick={() => togglePreview(r)}
                               className={BTN_SM}
                             >
                               {r.open ? "Hide" : "Preview"}
@@ -787,7 +1066,9 @@ export default function SheetPage() {
                             <button
                               onClick={() => sendOneClick(r)}
                               disabled={
-                                r.status === "sending" || r.status === "sent"
+                                r.status === "sending" ||
+                                r.status === "sent" ||
+                                r.filling
                               }
                               className={BTN_SM}
                             >
@@ -820,18 +1101,24 @@ export default function SheetPage() {
                               <p className="text-sm">
                                 <b>To:</b> {emailOf(r) || "(no email)"}
                               </p>
-                              {hasPlaceholder(d) && (
-                                <p className="rounded-lg bg-amber-100 p-2 text-sm text-amber-900">
-                                  Some text is still missing (like{" "}
-                                  {
-                                    (d.subject + d.body).match(
-                                      /\[[^\]]+\]/,
-                                    )?.[0]
-                                  }
-                                  ). Fill that column in the table, or type it
-                                  into the email below.
+                              {r.filling && (
+                                <p className="text-sm text-violet-800">
+                                  Gemini is filling the blanks…
                                 </p>
                               )}
+                              {stillLeft.length > 0 &&
+                                !r.filling &&
+                                !needsFill(r) && (
+                                  <p className="rounded-lg bg-amber-100 p-2 text-sm text-amber-900">
+                                    Some text is still missing (like{" "}
+                                    {stillLeft[0]}).{" "}
+                                    {SENDER_KEYS.includes(
+                                      norm(stillLeft[0].slice(1, -1)),
+                                    )
+                                      ? 'Type your name in "Your name" above.'
+                                      : "Type it into the email below, or fill that column in the table."}
+                                  </p>
+                                )}
                               <div>
                                 <label className={LABEL}>Subject</label>
                                 <input
@@ -865,6 +1152,13 @@ export default function SheetPage() {
                                   Send test to me
                                 </button>
                                 <button
+                                  onClick={() => aiFill(r)}
+                                  disabled={r.filling}
+                                  className={BTN_OUT}
+                                >
+                                  Fill with Gemini again
+                                </button>
+                                <button
                                   onClick={() => copyText(r)}
                                   className={BTN_OUT}
                                 >
@@ -876,16 +1170,6 @@ export default function SheetPage() {
                                     className={BTN_OUT}
                                   >
                                     I sent it through the form
-                                  </button>
-                                )}
-                                {r.draft && (
-                                  <button
-                                    onClick={() =>
-                                      patchRow(r.id, { draft: undefined })
-                                    }
-                                    className="text-sm font-semibold text-gray-600 underline"
-                                  >
-                                    Reset email text
                                   </button>
                                 )}
                               </div>

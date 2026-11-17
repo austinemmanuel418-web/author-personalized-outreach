@@ -1383,6 +1383,12 @@ export default function Home() {
           >
             Sheet mode
           </Link>
+          <Link
+            href="/send"
+            className="rounded-full border border-violet-300 bg-white px-3 py-1 text-xs font-semibold text-violet-700"
+          >
+            Send mode
+          </Link>
         </div>
       </header>
 
